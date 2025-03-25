@@ -16,6 +16,7 @@ use itertools::Itertools;
 use jito_protos::shredstream::{Entry as PbEntry, TraceShred};
 use log::{debug, error, info, warn};
 use prost::Message;
+use solana_entry::entry::Entry;
 use solana_ledger::shred::ReedSolomonCache;
 use solana_metrics::{datapoint_info, datapoint_warn};
 use solana_net_utils::SocketConfig;
@@ -25,6 +26,8 @@ use solana_perf::{
     recycler::Recycler,
 };
 use solana_sdk::clock::{Slot, MAX_PROCESSING_AGE};
+use solana_sdk::pubkey;
+use solana_sdk::pubkey::Pubkey;
 use solana_streamer::{
     sendmmsg::{batch_send, SendPktsError},
     streamer::{self, StreamerReceiveStats},
@@ -166,6 +169,8 @@ pub fn start_forwarder_threads(
         .collect::<Vec<JoinHandle<()>>>()
 }
 
+pub const PUMPFUN_MINT_AUTHORITY: Pubkey = pubkey!("TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM");
+
 /// Broadcasts the same packet to multiple recipients, parses it into a Shred if possible,
 /// and stores that shred in `all_shreds`.
 #[allow(clippy::too_many_arguments)]
@@ -222,40 +227,6 @@ fn recv_from_channel_and_send_multiple_dest(
         });
     });
 
-    // send out to RPCs
-    local_dest_sockets.iter().for_each(|outgoing_socketaddr| {
-        let packets_with_dest = packet_batch_vec[0]
-            .iter()
-            .filter_map(|pkt| {
-                let data = pkt.data(..)?;
-                let addr = outgoing_socketaddr;
-                Some((data, addr))
-            })
-            .collect::<Vec<(&[u8], &SocketAddr)>>();
-
-        match batch_send(send_socket, &packets_with_dest) {
-            Ok(_) => {
-                metrics
-                    .success_forward
-                    .fetch_add(packets_with_dest.len() as u64, Ordering::Relaxed);
-                metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
-            }
-            Err(SendPktsError::IoError(err, num_failed)) => {
-                metrics
-                    .fail_forward
-                    .fetch_add(packets_with_dest.len() as u64, Ordering::Relaxed);
-                metrics
-                    .duplicate
-                    .fetch_add(num_failed as u64, Ordering::Relaxed);
-                error!(
-                    "Failed to send batch of size {} to {outgoing_socketaddr:?}. \
-                     {num_failed} packets failed. Error: {err}",
-                    packets_with_dest.len()
-                );
-            }
-        }
-    });
-
     if should_reconstruct_shreds {
         deshred::reconstruct_shreds(
             packet_batch_vec
@@ -271,10 +242,58 @@ fn recv_from_channel_and_send_multiple_dest(
         deshredded_entries
             .drain(..)
             .for_each(|(slot, _entries, entries_bytes)| {
-                let _ = entry_sender.send(PbEntry {
-                    slot,
-                    entries: entries_bytes,
-                });
+                let entries = match bincode::deserialize::<Vec<Entry>>(&entries_bytes) {
+                    Ok(entries) => Some(entries),
+                    Err(_) => None,
+                };
+                if let Some(entries) = entries {
+                    for entry in entries {
+                        // log::info!("[{}]Transaction[{}][{}]: {:?}", thread_id, slot, fec_set_index, entry.transactions.len());
+                        // log::info!("Entry: {:?}", entry);
+                        // Process the transactions
+                        // for tx in entry.transactions {
+                        //     log::info!("Transaction[{}][{}]: {:?}", slot, fec_set_index, tx);
+                        // }
+
+                        for transaction in entry.transactions {
+                            if transaction.message.static_account_keys().contains(&PUMPFUN_MINT_AUTHORITY) {
+                                log::info!("Transaction[{}]: {:?}", slot, transaction.signatures[0]);
+
+                                let serialized_tx = bincode::serialize(&transaction).unwrap();
+                                // send out to RPCs
+                                local_dest_sockets.iter().for_each(|outgoing_socketaddr| {
+                                    let packets_with_dest = vec![(&serialized_tx, outgoing_socketaddr)];
+
+                                    match batch_send(send_socket, &packets_with_dest) {
+                                        Ok(_) => {
+                                            metrics
+                                                .success_forward
+                                                .fetch_add(packets_with_dest.len() as u64, Ordering::Relaxed);
+                                            metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
+                                        }
+                                        Err(SendPktsError::IoError(err, num_failed)) => {
+                                            metrics
+                                                .fail_forward
+                                                .fetch_add(packets_with_dest.len() as u64, Ordering::Relaxed);
+                                            metrics
+                                                .duplicate
+                                                .fetch_add(num_failed as u64, Ordering::Relaxed);
+                                            error!(
+                    "Failed to send batch of size {} to {outgoing_socketaddr:?}. \
+                     {num_failed} packets failed. Error: {err}",
+                    packets_with_dest.len()
+                );
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                // let _ = entry_sender.send(PbEntry {
+                //     slot,
+                //     entries: entries_bytes,
+                // });
             });
     }
 
