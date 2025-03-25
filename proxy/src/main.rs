@@ -18,6 +18,7 @@ use std::{
 use arc_swap::ArcSwap;
 use clap::{arg, Parser};
 use crossbeam_channel::{Receiver, RecvError, Sender};
+use env_logger::{Builder, Env, DEFAULT_FILTER_ENV, DEFAULT_WRITE_STYLE_ENV};
 use log::*;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use solana_client::client_error::{reqwest, ClientError};
@@ -195,9 +196,19 @@ fn shutdown_notifier(exit: Arc<AtomicBool>) -> io::Result<(Sender<()>, Receiver<
     Ok((s, r))
 }
 
+fn init_logger() {
+    let env = Env::new()
+        .filter_or(DEFAULT_FILTER_ENV, LevelFilter::Warn.as_str())
+        .write_style(DEFAULT_WRITE_STYLE_ENV);
+
+    Builder::from_env(env)
+        .format_timestamp_millis()
+        .init();
+}
+
 pub type ReconstructedShredsMap = HashMap<Slot, HashMap<u32 /* fec_set_index */, Vec<Shred>>>;
 fn main() -> Result<(), ShredstreamProxyError> {
-    env_logger::builder().init();
+    init_logger();
 
     let all_args: Args = Args::parse();
 
