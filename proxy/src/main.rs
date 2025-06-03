@@ -262,6 +262,7 @@ fn main() -> Result<(), ShredstreamProxyError> {
     )));
 
     let entry_sender = Arc::new(BroadcastSender::new(100));
+    let pumpfun_sender = Arc::new(BroadcastSender::new(100));
     let forward_stats = Arc::new(StreamerReceiveStats::new("shredstream_proxy-listen_thread"));
     let use_discovery_service =
         args.endpoint_discovery_url.is_some() && args.discovered_endpoints_port.is_some();
@@ -317,6 +318,7 @@ fn main() -> Result<(), ShredstreamProxyError> {
         let server_hdl = server::start_server_thread(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port),
             entry_sender.clone(),
+            pumpfun_sender.clone(),
             exit.clone(),
             shutdown_receiver.clone(),
         );

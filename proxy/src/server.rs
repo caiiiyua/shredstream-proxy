@@ -9,6 +9,7 @@ use crossbeam_channel::Receiver;
 use jito_protos::shredstream::{
     shredstream_proxy_server::{ShredstreamProxy, ShredstreamProxyServer},
     Entry as PbEntry, SubscribeEntriesRequest,
+    PumpfunTx, SubscribePumpfunTxRequest,
 };
 use log::{debug, info};
 use tokio::sync::broadcast::{Receiver as BroadcastReceiver, Sender};
@@ -17,11 +18,13 @@ use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 #[derive(Debug)]
 pub struct ShredstreamProxyService {
     entry_sender: Arc<Sender<PbEntry>>,
+    pumpfun_sender: Arc<Sender<PumpfunTx>>,
 }
 
 pub fn start_server_thread(
     addr: SocketAddr,
     entry_sender: Arc<Sender<PbEntry>>,
+    pumpfun_sender: Arc<Sender<PumpfunTx>>,
     exit: Arc<AtomicBool>,
     shutdown_receiver: Receiver<()>,
 ) -> JoinHandle<()> {
@@ -33,6 +36,7 @@ pub fn start_server_thread(
             tonic::transport::Server::builder()
                 .add_service(ShredstreamProxyServer::new(ShredstreamProxyService {
                     entry_sender,
+                    pumpfun_sender,
                 }))
                 .serve(addr)
                 .await
@@ -65,6 +69,30 @@ impl ShredstreamProxy for ShredstreamProxyService {
         tokio::spawn(async move {
             while let Ok(entry) = entry_receiver.recv().await {
                 match tx.send(Ok(entry)).await {
+                    Ok(_) => (),
+                    Err(_e) => {
+                        debug!("client disconnected");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(tonic::Response::new(ReceiverStream::new(rx)))
+    }
+
+    type SubscribePumpfunTxStream = ReceiverStream<Result<PumpfunTx, tonic::Status>>;
+
+    async fn subscribe_pumpfun_tx(
+        &self,
+        _request: tonic::Request<SubscribePumpfunTxRequest>,
+    ) -> Result<tonic::Response<Self::SubscribePumpfunTxStream>, tonic::Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let mut pumpfun_receiver: BroadcastReceiver<PumpfunTx> = self.pumpfun_sender.subscribe();
+
+        tokio::spawn(async move {
+            while let Ok(pumpfun_tx) = pumpfun_receiver.recv().await {
+                match tx.send(Ok(pumpfun_tx)).await {
                     Ok(_) => (),
                     Err(_e) => {
                         debug!("client disconnected");

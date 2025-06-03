@@ -222,40 +222,6 @@ fn recv_from_channel_and_send_multiple_dest(
         });
     });
 
-    // send out to RPCs
-    local_dest_sockets.iter().for_each(|outgoing_socketaddr| {
-        let packets_with_dest = packet_batch_vec[0]
-            .iter()
-            .filter_map(|pkt| {
-                let data = pkt.data(..)?;
-                let addr = outgoing_socketaddr;
-                Some((data, addr))
-            })
-            .collect::<Vec<(&[u8], &SocketAddr)>>();
-
-        match batch_send(send_socket, &packets_with_dest) {
-            Ok(_) => {
-                metrics
-                    .success_forward
-                    .fetch_add(packets_with_dest.len() as u64, Ordering::Relaxed);
-                metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
-            }
-            Err(SendPktsError::IoError(err, num_failed)) => {
-                metrics
-                    .fail_forward
-                    .fetch_add(packets_with_dest.len() as u64, Ordering::Relaxed);
-                metrics
-                    .duplicate
-                    .fetch_add(num_failed as u64, Ordering::Relaxed);
-                error!(
-                    "Failed to send batch of size {} to {outgoing_socketaddr:?}. \
-                     {num_failed} packets failed. Error: {err}",
-                    packets_with_dest.len()
-                );
-            }
-        }
-    });
-
     if should_reconstruct_shreds {
         deshred::reconstruct_shreds(
             packet_batch_vec
