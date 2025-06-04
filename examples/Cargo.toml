@@ -3,6 +3,10 @@ name = "examples"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "example"
+path = "deshred.rs"
+
 [dependencies]
 bincode = { workspace = true }
 jito-protos = { path = "../jito_protos" }
