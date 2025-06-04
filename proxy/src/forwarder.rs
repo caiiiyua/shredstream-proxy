@@ -10,13 +10,13 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use crossbeam_channel::{Receiver, RecvError};
+use crossbeam_channel::{bounded, Receiver, RecvError};
 use dashmap::DashMap;
 use itertools::Itertools;
 use jito_protos::shredstream::{Entry as PbEntry, TraceShred};
 use log::{debug, error, info, warn};
 use prost::Message;
-use solana_ledger::shred::ReedSolomonCache;
+use solana_ledger::shred::{ReedSolomonCache, Shred};
 use solana_metrics::{datapoint_info, datapoint_warn};
 use solana_net_utils::SocketConfig;
 use solana_perf::{
@@ -38,6 +38,27 @@ pub const DEDUPER_FALSE_POSITIVE_RATE: f64 = 0.001;
 pub const DEDUPER_NUM_BITS: u64 = 637_534_199; // 76MB
 pub const DEDUPER_RESET_CYCLE: Duration = Duration::from_secs(5 * 60);
 
+pub const MAX_RECORDED_PACKETS: u64 = 1024;
+
+// Suppose we use a left shift of 10 bits for `fec_set` (up to 1024).
+// Then we combine slot_id (in the high bits) and fec_set (in the low bits).
+// Finally, mod by `num_threads` to pick a worker thread.
+fn partition_id(slot_id: u64, fec_set: u32, num_threads: usize) -> usize {
+    // Combine into a single 64-bit number:
+    // (slot_id << 10) uses top bits, fec_set in the low 10 bits
+    let combined = (slot_id << 10) | (fec_set as u64);
+    // Then mod by num_threads
+    (combined % num_threads as u64) as usize
+}
+
+struct PartitionWorker {
+    id: usize,
+    rx: Receiver<Shred>,
+    // Each worker thread stores local data. No concurrency needed here:
+    local_map: HashMap<(u64, u32), Shred>,
+    // (slot, fec_set, shred_id) -> Shred
+}
+
 /// Bind to ports and start forwarding shreds
 #[allow(clippy::too_many_arguments)]
 pub fn start_forwarder_threads(
@@ -54,6 +75,7 @@ pub fn start_forwarder_threads(
     metrics: Arc<ShredMetrics>,
     shutdown_receiver: Receiver<()>,
     exit: Arc<AtomicBool>,
+    shred_senders: Arc<Vec<crossbeam_channel::Sender<Shred>>>,
 ) -> Vec<JoinHandle<()>> {
     let num_threads = num_threads
         .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).min(4));
@@ -96,15 +118,12 @@ pub fn start_forwarder_threads(
             let shutdown_receiver = shutdown_receiver.clone();
             let mut deshredded_entries = Vec::new();
             let rs_cache = ReedSolomonCache::default();
-            let entry_sender = entry_sender.clone();
             let exit = exit.clone();
+            let shred_senders = shred_senders.clone();
 
             let send_thread = Builder::new()
                 .name(format!("ssPxyTx_{thread_id}"))
                 .spawn(move || {
-                    let send_socket =
-                        UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
-                            .expect("to bind to udp port for forwarding");
                     let mut local_dest_sockets = unioned_dest_sockets.load();
 
                     let refresh_subscribers_tick = if use_discovery_service {
@@ -113,29 +132,17 @@ pub fn start_forwarder_threads(
                         crossbeam_channel::tick(Duration::MAX)
                     };
 
-                    // Track parsed Shred as reconstructed_shreds[ slot ][ fec_set_index ] -> Vec<Shred>
-                    let mut all_shreds: HashMap<
-                        Slot,
-                        HashMap<
-                            u32, /* fec_set_index */
-                            (bool /* completed */, HashSet<ComparableShred>),
-                        >,
-                    > = HashMap::with_capacity(MAX_PROCESSING_AGE);
-
                     while !exit.load(Ordering::Relaxed) {
                         crossbeam_channel::select! {
                             // forward packets
                             recv(packet_receiver) -> maybe_packet_batch => {
-                                let res = recv_from_channel_and_send_multiple_dest(
+                                let res = recv_from_channel_and_send_shreds(
                                     maybe_packet_batch,
                                     &deduper,
-                                    &mut all_shreds,
                                     &mut deshredded_entries,
                                     &rs_cache,
-                                    &send_socket,
-                                    &local_dest_sockets,
                                     should_reconstruct_shreds,
-                                    &entry_sender,
+                                    &shred_senders,
                                     debug_trace_shred,
                                     &metrics,
                                 );
@@ -164,6 +171,99 @@ pub fn start_forwarder_threads(
             vec![listen_thread, send_thread]
         })
         .collect::<Vec<JoinHandle<()>>>()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recv_from_channel_and_send_shreds(
+    maybe_packet_batch: Result<PacketBatch, RecvError>,
+    deduper: &RwLock<Deduper<2, [u8]>>,
+    deshredded_entries: &mut Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)>,
+    rs_cache: &ReedSolomonCache,
+    should_reconstruct_shreds: bool,
+    shred_senders: &Arc<Vec<crossbeam_channel::Sender<Shred>>>,
+    debug_trace_shred: bool,
+    metrics: &ShredMetrics,
+) -> Result<(), ShredstreamProxyError> {
+    let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError)?;
+    let trace_shred_received_time = SystemTime::now();
+    metrics
+        .received
+        .fetch_add(packet_batch.len() as u64, Ordering::Relaxed);
+    debug!(
+        "Got batch of {} packets, total size in bytes: {}",
+        packet_batch.len(),
+        packet_batch.iter().map(|x| x.meta().size).sum::<usize>()
+    );
+
+    let mut packet_batch_vec = vec![packet_batch];
+
+    // Store stats for each Packet
+    packet_batch_vec.iter().for_each(|batch| {
+        batch.iter().for_each(|packet| {
+            metrics
+                .packets_received
+                .entry(packet.meta().addr)
+                .and_modify(|(discarded, not_discarded)| {
+                    *discarded += packet.meta().discard() as u64;
+                    *not_discarded += (!packet.meta().discard()) as u64;
+                })
+                .or_insert_with(|| {
+                    (
+                        packet.meta().discard() as u64,
+                        (!packet.meta().discard()) as u64,
+                    )
+                });
+        });
+    });
+
+
+    let shred_threads = shred_senders.len();
+
+    packet_batch_vec[0].iter().filter_map(|packet| {
+        let data = packet.data(..)?;
+        let shred = Shred::new_from_serialized_shred(data.to_vec()).ok();
+        shred
+    }).for_each(|shred| {
+        let slot = shred.slot();
+        let fec_set_index = shred.fec_set_index();
+
+        let partition_id = partition_id(slot, fec_set_index, shred_threads);
+        let shred_sender = shred_senders[partition_id].clone();
+        match shred_sender.send(shred) {
+            Ok(_) => {
+                // metrics.ag.fetch_add(1, Ordering::Relaxed);
+                // metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
+            }
+            Err(e) => {
+                // metrics.agg_fail_forward.fetch_add(1, Ordering::Relaxed);
+                // metrics.duplicate.fetch_add(1, Ordering::Relaxed);
+                error!("Failed to send shred Error: {e}");
+            }
+            _ => {}
+        }
+    });
+
+    // Count TraceShred shreds
+    if debug_trace_shred {
+        packet_batch_vec[0]
+            .iter()
+            .filter_map(|p| TraceShred::decode(p.data(..)?).ok())
+            .filter(|t| t.created_at.is_some())
+            .for_each(|trace_shred| {
+                let elapsed = trace_shred_received_time
+                    .duration_since(SystemTime::try_from(trace_shred.created_at.unwrap()).unwrap())
+                    .unwrap_or_default();
+
+                datapoint_info!(
+                    "shredstream_proxy-trace_shred_latency",
+                    "trace_region" => trace_shred.region,
+                    ("trace_seq_num", trace_shred.seq_num as i64, i64),
+                    ("elapsed_micros", elapsed.as_micros(), i64),
+                );
+            });
+    }
+
+    Ok(())
 }
 
 /// Broadcasts the same packet to multiple recipients, parses it into a Shred if possible,

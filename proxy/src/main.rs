@@ -17,7 +17,7 @@ use std::{
 
 use arc_swap::ArcSwap;
 use clap::{arg, Parser};
-use crossbeam_channel::{Receiver, RecvError, Sender};
+use crossbeam_channel::{bounded, Receiver, RecvError, Sender};
 use log::*;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use solana_client::client_error::{reqwest, ClientError};
@@ -31,6 +31,8 @@ use tokio::{runtime::Runtime, sync::broadcast::Sender as BroadcastSender};
 use tonic::Status;
 
 use crate::{forwarder::ShredMetrics, token_authenticator::BlockEngineConnectionError};
+use crate::forwarder::MAX_RECORDED_PACKETS;
+
 mod deshred;
 pub mod forwarder;
 mod heartbeat;
@@ -220,6 +222,18 @@ fn main() -> Result<(), ShredstreamProxyError> {
         panic!("No destinations found. You must provide values for --dest-ip-ports or --endpoint-discovery-url.")
     }
 
+    let num_threads = args.num_threads
+        .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).max(4));
+    // Create a vector of (Sender, Receiver) pairs, one per thread
+    let mut partition_txs = Vec::with_capacity(num_threads);
+    let mut partition_rxs = Vec::with_capacity(num_threads);
+
+    for _ in 0..num_threads {
+        let (tx, rx) = bounded::<Shred>(MAX_RECORDED_PACKETS as usize);
+        partition_txs.push(tx);
+        partition_rxs.push(rx);
+    }
+
     let exit = Arc::new(AtomicBool::new(false));
     let (shutdown_sender, shutdown_receiver) =
         shutdown_notifier(exit.clone()).expect("Failed to set up signal handler");
@@ -280,8 +294,10 @@ fn main() -> Result<(), ShredstreamProxyError> {
         metrics.clone(),
         shutdown_receiver.clone(),
         exit.clone(),
+        Arc::new(partition_txs),
     );
     thread_handles.extend(forwarder_hdls);
+
 
     let report_metrics_thread = {
         let exit = exit.clone();
