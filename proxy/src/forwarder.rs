@@ -1,13 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, RwLock,
-    },
-    thread::{Builder, JoinHandle},
-    time::{Duration, SystemTime},
-};
+use std::{collections::{HashMap, HashSet}, net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, RwLock,
+}, thread, thread::{Builder, JoinHandle}, time::{Duration, SystemTime}};
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{bounded, Receiver, RecvError};
@@ -99,8 +93,9 @@ pub fn start_forwarder_threads(
         .enumerate()
         .flat_map(|(thread_id, incoming_shred_socket)| {
             let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
+            let thread_name = format!("ssPxyRx_{thread_id}");
             let listen_thread = streamer::receiver(
-                format!("ssListen{thread_id}"),
+                thread_name,
                 Arc::new(incoming_shred_socket),
                 exit.clone(),
                 packet_sender,
@@ -121,8 +116,9 @@ pub fn start_forwarder_threads(
             let exit = exit.clone();
             let shred_senders = shred_senders.clone();
 
+            let send_thread_name = format!("ssPxyTx_{thread_id}");
             let send_thread = Builder::new()
-                .name(format!("ssPxyTx_{thread_id}"))
+                .name(send_thread_name.clone())
                 .spawn(move || {
                     let mut local_dest_sockets = unioned_dest_sockets.load();
 
@@ -132,11 +128,14 @@ pub fn start_forwarder_threads(
                         crossbeam_channel::tick(Duration::MAX)
                     };
 
+                    let thread_name = send_thread_name.clone();
+
                     while !exit.load(Ordering::Relaxed) {
                         crossbeam_channel::select! {
                             // forward packets
                             recv(packet_receiver) -> maybe_packet_batch => {
                                 let res = recv_from_channel_and_send_shreds(
+                                    &thread_name,
                                     maybe_packet_batch,
                                     &deduper,
                                     &mut deshredded_entries,
@@ -175,6 +174,7 @@ pub fn start_forwarder_threads(
 
 #[allow(clippy::too_many_arguments)]
 fn recv_from_channel_and_send_shreds(
+    thread_name: &str,
     maybe_packet_batch: Result<PacketBatch, RecvError>,
     deduper: &RwLock<Deduper<2, [u8]>>,
     deshredded_entries: &mut Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)>,
@@ -190,12 +190,18 @@ fn recv_from_channel_and_send_shreds(
         .received
         .fetch_add(packet_batch.len() as u64, Ordering::Relaxed);
     info!(
-        "Got batch of {} packets, total size in bytes: {}",
+        "[{}]Got batch of {} packets, total size in bytes: {}",
+        thread_name,
         packet_batch.len(),
         packet_batch.iter().map(|x| x.meta().size).sum::<usize>()
     );
 
     let mut packet_batch_vec = vec![packet_batch];
+
+    let num_deduped = solana_perf::deduper::dedup_packets_and_count_discards(
+        &deduper.read().unwrap(),
+        &mut packet_batch_vec,
+    );
 
     // Store stats for each Packet
     packet_batch_vec.iter().for_each(|batch| {
@@ -226,21 +232,20 @@ fn recv_from_channel_and_send_shreds(
     }).for_each(|shred| {
         let slot = shred.slot();
         let fec_set_index = shred.fec_set_index();
+        let shred_id = shred.id();
 
         let partition_id = partition_id(slot, fec_set_index, shred_threads);
         let shred_sender = shred_senders[partition_id].clone();
+
         match shred_sender.send(shred) {
             Ok(_) => {
-                info!("Sent shred to partition {partition_id} for slot {slot}, fec_set_index {fec_set_index}");
-                // metrics.ag.fetch_add(1, Ordering::Relaxed);
-                // metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
+                info!("[{thread_name}]Sent shred to partition {partition_id} for slot {:?}, fec_set_index {fec_set_index}", shred_id);
+                metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
             }
             Err(e) => {
-                // metrics.agg_fail_forward.fetch_add(1, Ordering::Relaxed);
-                // metrics.duplicate.fetch_add(1, Ordering::Relaxed);
+                metrics.duplicate.fetch_add(1, Ordering::Relaxed);
                 error!("Failed to send shred Error: {e}");
             }
-            _ => {}
         }
     });
 

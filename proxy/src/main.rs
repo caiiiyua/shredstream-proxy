@@ -14,23 +14,26 @@ use std::{
     thread::{sleep, spawn, JoinHandle},
     time::Duration,
 };
-
+use std::collections::HashSet;
+use std::thread::Builder;
 use arc_swap::ArcSwap;
 use clap::{arg, Parser};
 use crossbeam_channel::{bounded, Receiver, RecvError, Sender};
 use log::*;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use solana_client::client_error::{reqwest, ClientError};
-use solana_ledger::shred::Shred;
+use solana_ledger::shred::{Shred, ShredId};
 use solana_metrics::set_host_id;
 use solana_perf::deduper::Deduper;
 use solana_sdk::{clock::Slot, signature::read_keypair_file};
+use solana_sdk::clock::MAX_PROCESSING_AGE;
 use solana_streamer::streamer::StreamerReceiveStats;
 use thiserror::Error;
 use tokio::{runtime::Runtime, sync::broadcast::Sender as BroadcastSender};
 use tonic::Status;
 
 use crate::{forwarder::ShredMetrics, token_authenticator::BlockEngineConnectionError};
+use crate::deshred::ComparableShred;
 use crate::forwarder::MAX_RECORDED_PACKETS;
 
 mod deshred;
@@ -224,11 +227,13 @@ fn main() -> Result<(), ShredstreamProxyError> {
 
     let num_threads = args.num_threads
         .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).max(4));
-    // Create a vector of (Sender, Receiver) pairs, one per thread
-    let mut partition_txs = Vec::with_capacity(num_threads);
-    let mut partition_rxs = Vec::with_capacity(num_threads);
 
-    for _ in 0..num_threads {
+    let deshred_threads = num_threads * 2;
+    // Create a vector of (Sender, Receiver) pairs, one per thread
+    let mut partition_txs = Vec::with_capacity(deshred_threads);
+    let mut partition_rxs = Vec::with_capacity(deshred_threads);
+
+    for _ in 0..deshred_threads {
         let (tx, rx) = bounded::<Shred>(MAX_RECORDED_PACKETS as usize);
         partition_txs.push(tx);
         partition_rxs.push(rx);
@@ -298,6 +303,14 @@ fn main() -> Result<(), ShredstreamProxyError> {
     );
     thread_handles.extend(forwarder_hdls);
 
+    let deshred_threads = start_deshred_threads(
+        deshred_threads,
+        partition_rxs,
+        shutdown_receiver.clone(),
+        exit.clone(),
+    );
+    thread_handles.extend(deshred_threads);
+
 
     let report_metrics_thread = {
         let exit = exit.clone();
@@ -360,6 +373,65 @@ fn main() -> Result<(), ShredstreamProxyError> {
         metrics.duplicate_cumulative.load(Ordering::Relaxed),
     );
     Ok(())
+}
+
+/// Deshred threads are used to try recovering the entries from the shreds.
+#[allow(clippy::too_many_arguments)]
+pub fn start_deshred_threads(
+    deshred_threads: usize,
+    shred_receivers: Vec<Receiver<Shred>>,
+    shutdown_receiver: Receiver<()>,
+    exit: Arc<AtomicBool>,
+) -> Vec<JoinHandle<()>> {
+    (0..deshred_threads)
+        .map(|thread_id| {
+            // Initialize the ReedSolomonCache
+            let exit = exit.clone();
+            let shred_receiver = shred_receivers[thread_id].clone();
+            let shutdown_receiver = shutdown_receiver.clone();
+            let thread_name = format!("sstDeshred_{thread_id}");
+            let h = Builder::new()
+                .name(thread_name.clone())
+                .spawn(move || {
+                    // Track parsed Shred as reconstructed_shreds[ slot ][ fec_set_index ] -> Vec<Shred>
+                    let mut all_shreds: HashMap<
+                        Slot,
+                        HashMap<
+                            u32, /* fec_set_index */
+                            (bool /* completed */, HashSet<ComparableShred>),
+                        >,
+                    > = HashMap::with_capacity(4);
+
+                    let mut processed_shreds: HashSet<ShredId> = HashSet::new();
+
+                    while !exit.load(Ordering::Relaxed) {
+                        crossbeam_channel::select! {
+                            // forward packets
+                            recv(shred_receiver) -> shred => {
+                                if let Ok(shred) = shred {
+                                    let shred_id = shred.id();
+                                    if processed_shreds.contains(&shred_id) {
+                                        // already processed this shred, skip
+                                        continue;
+                                    }
+                                    let fec_set_index = shred.fec_set_index();
+                                    info!("Deshred thread {thread_name} received fec: [{}] shred: {:?}", fec_set_index, shred_id);
+                                    processed_shreds.insert(shred_id);
+                                }
+                            }
+
+                            // handle shutdown (avoid using sleep since it can hang)
+                            recv(shutdown_receiver) -> _ => {
+                                break;
+                            }
+                        }
+                    }
+                    log::warn!("Exiting deshred thread {thread_id}.");
+                })
+                .unwrap();
+            h
+        })
+        .collect()
 }
 
 fn start_heartbeat(
