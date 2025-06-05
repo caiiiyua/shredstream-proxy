@@ -82,7 +82,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
                         .flatten()
                         .copied()
                         .collect();
-                    info!("Processing neighbour shreds for slot {slot}, fec_set_index {fec_set_index}, index {}. Neighbor shreds count: {}, data: {}",
+                    debug!("Processing neighbour shreds for slot {slot}, fec_set_index {fec_set_index}, index {}. Neighbor shreds count: {}, data: {}",
                         neighbor_shreds.iter().map(|s| s.index()).join(", "),
                         neighbor_shreds.len(),
                         shreds_data.len()
