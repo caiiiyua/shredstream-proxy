@@ -64,13 +64,13 @@ pub fn reconstruct_shreds_to_entries<'a>(
                 let neighbor_shreds = shreds
                     .iter()
                     .filter(|shred_in_fec|
-                        shred_in_fec.shred_type() == ShredType::Data &&
-                            ((index > 2 && shred_in_fec.index() >= index - 2)
-                                && (index <= shred_in_fec.index() + 2))
+                        shred_in_fec.shred_type() == ShredType::Data
+                            && shred_in_fec.index() >= index.saturating_sub(2) && shred_in_fec.index() <= index + 2
                     )
                     .sorted_by_key(|x| x.index())
                     .map(|shred_in_fec| shred_in_fec.0.clone())
                     .collect_vec();
+
                 runtime.spawn(async move {
                     let shreds_data: Vec<u8> = neighbor_shreds
                         .iter()
