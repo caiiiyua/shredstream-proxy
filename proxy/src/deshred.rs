@@ -90,7 +90,9 @@ pub fn reconstruct_shreds_to_entries<'a>(
                     // 3. process the neighborhood of shreds
                     if let Ok(pumpfun_tx) = extract_pumpfun_transaction_safe(slot, &shreds_data) {
                         info!("[{:?}] PumpfunTx: {}", start.elapsed(), pumpfun_tx);
-                        pumpfun_sender.send(PumpfunTx::from(pumpfun_tx)).unwrap();
+                        pumpfun_sender.send(PumpfunTx::from(pumpfun_tx))
+                            .map_err(|e| warn!("Failed to send PumpfunTx: {e}"))
+                            .ok();
                     }
                 });
             }
