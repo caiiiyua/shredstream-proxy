@@ -1,4 +1,5 @@
 use std::{collections::{HashMap, HashSet}, fmt, hash::Hash, sync::atomic::Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use itertools::{min, Itertools};
 use jito_protos::shredstream::{Entry, PumpfunTx, TraceShred};
@@ -158,7 +159,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
             ) {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!(
+                    debug!(
                         "slot {slot} failed to deshred fec_set_index {fec_set_index}. num_expected_data_shreds: {num_expected_data_shreds}, num_data_shreds: {num_data_shreds}. shred set len: {}, recovered shred set len: {},  Err: {e}.",
                         shreds.len(),
                         recovered_shreds.len(),
@@ -174,7 +175,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
             ) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!(
+                    debug!(
                             "slot {slot} fec_set_index {fec_set_index} failed to deserialize bincode payload of size {}. Err: {e}",
                             deshred_payload.len()
                         );
@@ -523,13 +524,11 @@ fn extract_pumpfun_transaction_safe(
     slot: u64,
     shred_data: &[u8],
 ) -> Result<PumpfunTransaction, String> {
-    extract_pumpfun_transaction(slot, shred_data).ok_or_else(|| {
-        format!(
-            "Failed to extract Pumpfun transaction from slot {} with data size {}",
-            slot,
-            shred_data.len()
-        )
-    })
+    match catch_unwind(AssertUnwindSafe(|| extract_pumpfun_transaction(slot, shred_data))) {
+        Ok(Some(tx)) => Ok(tx),
+        Ok(None) => Err("Failed to extract Pumpfun transaction: No valid data found".to_string()),
+        Err(e) => Err(format!("Failed to extract Pumpfun transaction: {:?}", e)),
+    }
 }
 
 fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTransaction> {
