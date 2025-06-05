@@ -554,9 +554,9 @@ fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTr
     let dev_account_index = account_key_indices[6];
     let creator_vault_index = account_key_indices[9];
 
-    info!("[Nehe]Pumpfun Program Index: {}, Token Mint Index: {}, Bonding Curve Index: {}, Bonding Curve Vault Index: {}, Dev Account Index: {}", pumpfun_program_index, token_mint_index, bonding_curve_index, bonding_curve_vault_index, dev_account_index);
+    info!("[Nehe]Pumpfun Program Index: {}, Fee Account Index: {}, Token Mint Index: {}, Bonding Curve Index: {}, Dev Account Index: {}", pumpfun_program_index, fee_account_index, token_mint_index, bonding_curve_index, dev_account_index);
 
-    if (pumpfun_program_index as usize - token_mint_index as usize) * 32 > pumpfun_program_pos  {
+    if (pumpfun_program_index as usize - fee_account_index as usize) * 32 > pumpfun_program_pos  {
         return None;
     }
 
