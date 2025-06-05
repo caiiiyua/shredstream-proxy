@@ -59,7 +59,7 @@ pub fn heartbeat_loop_thread(
     auth_keypair: Arc<Keypair>,
     desired_regions: Vec<String>,
     recv_socket: SocketAddr,
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     service_name: String,
     metrics: Arc<ShredMetrics>,
     shutdown_receiver: Receiver<()>,

@@ -201,7 +201,7 @@ fn shutdown_notifier(exit: Arc<AtomicBool>) -> io::Result<(Sender<()>, Receiver<
     Ok((s, r))
 }
 
-use jito_protos::shredstream::{Entry as PbEntry, TraceShred};
+use jito_protos::shredstream::{Entry as PbEntry, Entry, TraceShred};
 
 pub type ReconstructedShredsMap = HashMap<Slot, HashMap<u32 /* fec_set_index */, Vec<Shred>>>;
 fn main() -> Result<(), ShredstreamProxyError> {
@@ -260,11 +260,11 @@ fn main() -> Result<(), ShredstreamProxyError> {
 
     let metrics = Arc::new(ShredMetrics::new(args.grpc_service_port.is_some()));
 
-    let runtime = Runtime::new()?;
+    let runtime = Arc::new(Runtime::new()?);
     let mut thread_handles = vec![];
     if let ProxySubcommands::Shredstream(args) = shredstream_args {
         let heartbeat_hdl =
-            start_heartbeat(args, &exit, &shutdown_receiver, runtime, metrics.clone());
+            start_heartbeat(args, &exit, &shutdown_receiver, runtime.clone(), metrics.clone());
         thread_handles.push(heartbeat_hdl);
     }
 
@@ -313,6 +313,7 @@ fn main() -> Result<(), ShredstreamProxyError> {
         exit.clone(),
         entry_sender.clone(),
         metrics.clone(),
+        runtime.clone(),
     );
     thread_handles.extend(deshred_threads);
 
@@ -389,6 +390,7 @@ pub fn start_deshred_threads(
     exit: Arc<AtomicBool>,
     entry_sender: Arc<tokio::sync::broadcast::Sender<PbEntry>>,
     metrics: Arc<ShredMetrics>,
+    runtime: Arc<Runtime>,
 ) -> Vec<JoinHandle<()>> {
     (0..deshred_threads)
         .map(|thread_id| {
@@ -401,6 +403,7 @@ pub fn start_deshred_threads(
             let entry_sender = entry_sender.clone();
             let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)> = Vec::new();
             let rs_cache = ReedSolomonCache::default();
+            let runtime = runtime.clone();
             let h = Builder::new()
                 .name(thread_name.clone())
                 .spawn(move || {
@@ -426,7 +429,7 @@ pub fn start_deshred_threads(
                                         // already processed this shred, skip
                                         continue;
                                     }
-                                    info!("Deshred thread {thread_name} received fec: [{}] shred: {:?}", fec_set_index, shred_id);
+                                    debug!("Deshred thread {thread_name} received fec: [{}] shred: {:?}", fec_set_index, shred_id);
                                     processed_shreds.insert(shred_id);
 
                                     deshred::reconstruct_shreds_to_entries(
@@ -435,6 +438,7 @@ pub fn start_deshred_threads(
                                         &mut deshredded_entries,
                                         &rs_cache,
                                         &metrics,
+                                        &runtime,
                                     );
                                     let mut deshred_entries = &mut deshredded_entries;
 
@@ -469,7 +473,7 @@ fn start_heartbeat(
     args: ShredstreamArgs,
     exit: &Arc<AtomicBool>,
     shutdown_receiver: &Receiver<()>,
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
     metrics: Arc<ShredMetrics>,
 ) -> JoinHandle<()> {
     let auth_keypair = Arc::new(

@@ -3,17 +3,17 @@ use std::{
     hash::Hash,
     sync::atomic::Ordering,
 };
-
+use std::sync::Arc;
 use itertools::Itertools;
 use jito_protos::shredstream::TraceShred;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use prost::Message;
 use solana_ledger::shred::{
     merkle::{Shred, ShredCode},
     ReedSolomonCache, Shredder,
 };
 use solana_sdk::clock::{Slot, MAX_PROCESSING_AGE};
-
+use tokio::runtime::Runtime;
 use crate::forwarder::ShredMetrics;
 
 /// Returns the number of shreds reconstructed
@@ -27,6 +27,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
     deshredded_entries: &mut Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)>,
     rs_cache: &ReedSolomonCache,
     metrics: &ShredMetrics,
+    runtime: &Arc<Runtime>,
 ) -> usize {
     let mut recovered_count = 0;
     deshredded_entries.clear();
@@ -34,6 +35,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
     if let Ok(shred) = Shred::try_from(shred) {
         let slot = shred.common_header().slot;
         let fec_set_index = shred.fec_set_index();
+        let index = shred.index();
         all_shreds
             .entry(slot)
             .or_default()
@@ -55,6 +57,27 @@ pub fn reconstruct_shreds_to_entries<'a>(
             if *already_deshredded {
                 debug!("already completed slot {slot}");
                 continue;
+            }
+
+            // Processing the neighborhood of shreds before deshredding
+            // 1. check if the shred is highest slot seen and only process if it is
+            if slot >= highest_slot_seen {
+                // 2. get the neighborhood of shreds
+                let neighbor_shreds = shreds
+                    .iter()
+                    .filter(|shred_in_fec| {
+                        shred_in_fec.index() == index
+                            || index > 0 && shred_in_fec.index() == index - 1
+                            || index == shred_in_fec.index() + 1
+                    })
+                    .sorted_by_key(|x| x.index())
+                    .map(|shred_in_fec| shred_in_fec.clone())
+                    .collect_vec();
+                runtime.spawn(async move {
+                    info!("Processing neighbour shreds for slot {slot}, fec_set_index {fec_set_index}, index {}. Neighbor shreds count: {}",
+                        neighbor_shreds.iter().map(|s| s.index()).join(", "),
+                        neighbor_shreds.len());
+                });
             }
 
             let (num_expected_data_shreds, num_data_shreds) = can_recover(shreds);

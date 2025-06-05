@@ -26,12 +26,6 @@ async fn main() -> Result<(), std::io::Error> {
                     continue;
                 }
             };
-        // println!(
-        //     "slot {}, entries: {}, transactions: {}",
-        //     slot_entry.slot,
-        //     entries.len(),
-        //     entries.iter().map(|e| e.transactions.len()).sum::<usize>()
-        // );
         let entries_size = entries.len();
         let transactions = entries.iter().map(|e| e.transactions.len()).sum::<usize>();
         for entry in entries {
