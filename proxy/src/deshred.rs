@@ -1,16 +1,14 @@
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-    sync::atomic::Ordering,
-};
+use std::{collections::{HashMap, HashSet}, fmt, hash::Hash, sync::atomic::Ordering};
 use std::sync::Arc;
 use itertools::Itertools;
 use jito_protos::shredstream::TraceShred;
 use log::{debug, info, warn};
 use prost::Message;
 use solana_ledger::shred::{merkle::{Shred, ShredCode}, ReedSolomonCache, ShredType, Shredder};
+use solana_sdk::bs58;
 use solana_sdk::clock::{Slot, MAX_PROCESSING_AGE};
 use tokio::runtime::Runtime;
+use tokio::time::Instant;
 use crate::forwarder::ShredMetrics;
 
 /// Returns the number of shreds reconstructed
@@ -72,6 +70,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
                     .collect_vec();
 
                 runtime.spawn(async move {
+                    let start = Instant::now();
                     let shreds_data: Vec<u8> = neighbor_shreds
                         .iter()
                         // keep only shreds whose payload really contains "data"
@@ -85,6 +84,10 @@ pub fn reconstruct_shreds_to_entries<'a>(
                         neighbor_shreds.len(),
                         shreds_data.len()
                     );
+                    // 3. process the neighborhood of shreds
+                    if let Some(pumpfun_tx) = extract_pumpfun_transaction(slot, &shreds_data) {
+                        info!("[{:?}] PumpfunTx: {:?}", start.elapsed(), pumpfun_tx);
+                    }
                 });
             }
 
@@ -496,6 +499,166 @@ impl PartialEq for ComparableShred {
         }
     }
 }
+
+const PUMPFUN_MINT_AUTHORITY_RAW: &[u8; 32] = &[
+    0x06, 0xc5, 0xc1, 0xce, 0x63, 0x8d, 0x25, 0x67, 0xd2, 0x64, 0x68, 0xb0, 0x5e, 0xb9, 0x51, 0xd1,
+    0xa2, 0x8d, 0xcc, 0x6e, 0x12, 0x34, 0x82, 0xb5, 0xc6, 0x75, 0x14, 0x97, 0x70, 0xe6, 0x2b, 0xf2,
+];
+const PUMPFUN_BUY_INSTRUCTION: &[u8; 8] = &[
+    0x66, 0x06, 0x3d, 0x12, 0x01, 0xda, 0xeb, 0xea,
+];
+
+const PUMPFUN_PROGRAM_ID: &[u8; 32] = &[
+    0x01, 0x56, 0xe0, 0xf6, 0x93, 0x66, 0x5a, 0xcf, 0x44, 0xdb, 0x15, 0x68, 0xbf, 0x17, 0x5b, 0xaa,
+    0x51, 0x89, 0xcb, 0x97, 0xf5, 0xd2, 0xff, 0x3b, 0x65, 0x5d, 0x2b, 0xb6, 0xfd, 0x6d, 0x18, 0xb0,
+];
+
+fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTransaction> {
+    // Step 1: Find the mint authority
+    let mint_authority_pos = shred_data.windows(PUMPFUN_MINT_AUTHORITY_RAW.len())
+        .position(|window| window == PUMPFUN_MINT_AUTHORITY_RAW)?;
+    let mint_authority_slice = &shred_data[mint_authority_pos..];
+
+    // Step 2: Find the buy instruction data after the mint authority
+    let buy_instruction_pos = mint_authority_slice.windows(PUMPFUN_BUY_INSTRUCTION.len())
+        .position(|window| window == PUMPFUN_BUY_INSTRUCTION)? + mint_authority_pos;
+
+    // Step 3: Extract token amount and SOL paid (8 bytes each after the buy instruction)
+    let token_amount_pos = buy_instruction_pos + PUMPFUN_BUY_INSTRUCTION.len();
+    if token_amount_pos + 16 > shred_data.len() {
+        return None; // Fail early if not enough data is present for token amount and sol paid
+    }
+    let token_amount = u64::from_le_bytes(shred_data[token_amount_pos..token_amount_pos + 8].try_into().ok()?);
+    let sol_paid = u64::from_le_bytes(shred_data[token_amount_pos + 8..token_amount_pos + 16].try_into().ok()?);
+
+    // Step 4: Seek 12 bytes before the instruction length byte
+    let instruction_len_pos = buy_instruction_pos.checked_sub(1)?;
+    let account_keys_pos = instruction_len_pos.checked_sub(12)?;
+
+    // Step 5: Extract the account key indices (12 bytes)
+    let account_key_indices = &shred_data[account_keys_pos..instruction_len_pos];
+
+    // Step 6: Search for the Pumpfun program in the shred data
+    let pumpfun_program_pos = shred_data.windows(PUMPFUN_PROGRAM_ID.len())
+        .position(|window| window == PUMPFUN_PROGRAM_ID)?;
+
+    // Step 7: After finding the Pumpfun program, locate the other accounts using relative positions
+    // Extract account keys
+    let pumpfun_program_index = *account_key_indices.last()?;
+
+    // Step 8: Calculate relative offsets for token mint, bonding curve, and vault
+    let fee_account_index = account_key_indices[1];
+    let token_mint_index = account_key_indices[2];
+    let bonding_curve_index = account_key_indices[3];
+    let bonding_curve_vault_index = account_key_indices[4];
+    let dev_account_index = account_key_indices[6];
+    let creator_vault_index = account_key_indices[9];
+
+    info!("[Nehe]Pumpfun Program Index: {}, Token Mint Index: {}, Bonding Curve Index: {}, Bonding Curve Vault Index: {}, Dev Account Index: {}", pumpfun_program_index, token_mint_index, bonding_curve_index, bonding_curve_vault_index, dev_account_index);
+
+    if (pumpfun_program_index as usize - token_mint_index as usize) * 32 > pumpfun_program_pos  {
+        return None;
+    }
+
+    // Step 9: Extract account addresses based on calculated indices
+    let fee_accoun_pos = pumpfun_program_pos - (pumpfun_program_index - fee_account_index) as usize * 32;
+    let fee_account = &shred_data[fee_accoun_pos..(fee_accoun_pos + 32)];
+
+    let token_mint_pos = pumpfun_program_pos - (pumpfun_program_index - token_mint_index) as usize * 32;
+    let token_mint = &shred_data[token_mint_pos..(token_mint_pos + 32)];
+
+    let bonding_curve_pos = token_mint_pos + 32 * (bonding_curve_index - token_mint_index) as usize;
+    if bonding_curve_pos + 32 >= shred_data.len() {
+        return None;
+    }
+    let bonding_curve = &shred_data[bonding_curve_pos..(bonding_curve_pos + 32)];
+    let bonding_curve_vault_pos = bonding_curve_pos + 32;
+    let bonding_curve_vault = &shred_data[bonding_curve_vault_pos..(bonding_curve_vault_pos + 32)];
+    let dev_account_offset = (pumpfun_program_index - dev_account_index) as usize * 32;
+    if pumpfun_program_pos < dev_account_offset {
+        return None;
+    }
+    let dev_account_pos = pumpfun_program_pos - dev_account_offset;
+    if dev_account_pos + 32 >= shred_data.len() {
+        return None;
+    }
+    let dev_account = &shred_data[dev_account_pos..(dev_account_pos + 32)];
+
+    let creator_vault_offset = (pumpfun_program_index - creator_vault_index) as usize * 32;
+    if pumpfun_program_pos < creator_vault_offset {
+        return None;
+    }
+    let creator_vault_pos = pumpfun_program_pos - creator_vault_offset;
+    if creator_vault_pos + 32 >= shred_data.len() {
+        return None;
+    }
+    let creator_vault = &shred_data[creator_vault_pos..(creator_vault_pos + 32)];
+
+    let block_hash_pos = token_mint_pos + 32 * (18 - token_mint_index) as usize;
+    // println!("{}", hex::encode(&shred_data[(token_mint_pos-33)..(block_hash_pos + 32)]));
+    if block_hash_pos + 32 >= shred_data.len() {
+        return None;
+    }
+    let block_hash = &shred_data[block_hash_pos..(block_hash_pos + 32)];
+
+    // Return the result if all steps succeeded
+    Some(PumpfunTransaction {
+        token_amount,
+        sol_paid,
+        slot,
+        fee_account: fee_account.try_into().ok()?,
+        token_mint: token_mint.try_into().ok()?,
+        bonding_curve: bonding_curve.try_into().ok()?,
+        bonding_curve_vault: bonding_curve_vault.try_into().ok()?,
+        creator_vault: creator_vault.try_into().ok()?,
+        block_hash: block_hash.try_into().ok()?,
+        dev_account: dev_account.try_into().ok()?,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct PumpfunTransaction {
+    token_amount: u64,
+    sol_paid: u64,
+    slot: u64,
+    fee_account: [u8; 32],
+    token_mint: [u8; 32],
+    dev_account: [u8; 32],
+    bonding_curve: [u8; 32],
+    bonding_curve_vault: [u8; 32],
+    creator_vault: [u8; 32],
+    block_hash: [u8; 32],
+}
+
+impl fmt::Display for PumpfunTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PumpfunTransaction {{\n\
+             \ttoken_amount: {},\n\
+             \tsol_paid: {},\n\
+             \tfee_account: {:?},\n\
+             \ttoken_mint: {:?},\n\
+             \tbonding_curve: {:?},\n\
+             \tbonding_curve_vault: {:?},\n\
+             \tdev_account: {:?},\n\
+             \tcreator_vault: {:?},\n\
+             \tblock_hash: {:?}\n\
+             }}",
+            self.token_amount,
+            self.sol_paid,
+            bs58::encode(self.fee_account).into_string(),
+            bs58::encode(self.token_mint).into_string(),
+            bs58::encode(self.bonding_curve).into_string(),
+            bs58::encode(self.bonding_curve_vault).into_string(),
+            bs58::encode(self.dev_account).into_string(),
+            bs58::encode(self.creator_vault).into_string(),
+            bs58::encode(self.block_hash).into_string(),
+        )
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use std::{
