@@ -109,7 +109,7 @@ impl fmt::Display for PumpfunTransaction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "PumpfunTransaction {{\n\
+            "PumpfunTransaction [{}] {{\n\
              \ttoken_amount: {},\n\
              \tsol_paid: {},\n\
              \tfee_account: {:?},\n\
@@ -120,6 +120,7 @@ impl fmt::Display for PumpfunTransaction {
              \tcreator_vault: {:?},\n\
              \tblock_hash: {:?}\n\
              }}",
+            self.slot,
             self.token_amount,
             self.sol_paid,
             bs58::encode(self.fee_account).into_string(),
