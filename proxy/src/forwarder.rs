@@ -189,7 +189,7 @@ fn recv_from_channel_and_send_shreds(
     metrics
         .received
         .fetch_add(packet_batch.len() as u64, Ordering::Relaxed);
-    info!(
+    debug!(
         "[{}]Got batch of {} packets, total size in bytes: {}",
         thread_name,
         packet_batch.len(),
@@ -239,7 +239,7 @@ fn recv_from_channel_and_send_shreds(
 
         match shred_sender.send(shred) {
             Ok(_) => {
-                info!("[{thread_name}]Sent shred to partition {partition_id} for slot {:?}, fec_set_index {fec_set_index}", shred_id);
+                debug!("[{thread_name}]Sent shred to partition {partition_id} for slot {:?}, fec_set_index {fec_set_index}", shred_id);
                 metrics.duplicate.fetch_add(num_deduped, Ordering::Relaxed);
             }
             Err(e) => {

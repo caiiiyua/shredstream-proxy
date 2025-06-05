@@ -19,10 +19,11 @@ use std::thread::Builder;
 use arc_swap::ArcSwap;
 use clap::{arg, Parser};
 use crossbeam_channel::{bounded, Receiver, RecvError, Sender};
+use itertools::Itertools;
 use log::*;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use solana_client::client_error::{reqwest, ClientError};
-use solana_ledger::shred::{Shred, ShredId};
+use solana_ledger::shred::{ReedSolomonCache, Shred, ShredId};
 use solana_metrics::set_host_id;
 use solana_perf::deduper::Deduper;
 use solana_sdk::{clock::Slot, signature::read_keypair_file};
@@ -200,6 +201,8 @@ fn shutdown_notifier(exit: Arc<AtomicBool>) -> io::Result<(Sender<()>, Receiver<
     Ok((s, r))
 }
 
+use jito_protos::shredstream::{Entry as PbEntry, TraceShred};
+
 pub type ReconstructedShredsMap = HashMap<Slot, HashMap<u32 /* fec_set_index */, Vec<Shred>>>;
 fn main() -> Result<(), ShredstreamProxyError> {
     env_logger::builder().init();
@@ -308,6 +311,8 @@ fn main() -> Result<(), ShredstreamProxyError> {
         partition_rxs,
         shutdown_receiver.clone(),
         exit.clone(),
+        entry_sender.clone(),
+        metrics.clone(),
     );
     thread_handles.extend(deshred_threads);
 
@@ -382,6 +387,8 @@ pub fn start_deshred_threads(
     shred_receivers: Vec<Receiver<Shred>>,
     shutdown_receiver: Receiver<()>,
     exit: Arc<AtomicBool>,
+    entry_sender: Arc<tokio::sync::broadcast::Sender<PbEntry>>,
+    metrics: Arc<ShredMetrics>,
 ) -> Vec<JoinHandle<()>> {
     (0..deshred_threads)
         .map(|thread_id| {
@@ -390,6 +397,10 @@ pub fn start_deshred_threads(
             let shred_receiver = shred_receivers[thread_id].clone();
             let shutdown_receiver = shutdown_receiver.clone();
             let thread_name = format!("sstDeshred_{thread_id}");
+            let metrics = metrics.clone();
+            let entry_sender = entry_sender.clone();
+            let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)> = Vec::new();
+            let rs_cache = ReedSolomonCache::default();
             let h = Builder::new()
                 .name(thread_name.clone())
                 .spawn(move || {
@@ -403,20 +414,39 @@ pub fn start_deshred_threads(
                     > = HashMap::with_capacity(4);
 
                     let mut processed_shreds: HashSet<ShredId> = HashSet::new();
-
                     while !exit.load(Ordering::Relaxed) {
                         crossbeam_channel::select! {
                             // forward packets
                             recv(shred_receiver) -> shred => {
                                 if let Ok(shred) = shred {
+                                    let slot = shred.slot();
+                                    let fec_set_index = shred.fec_set_index();
                                     let shred_id = shred.id();
                                     if processed_shreds.contains(&shred_id) {
                                         // already processed this shred, skip
                                         continue;
                                     }
-                                    let fec_set_index = shred.fec_set_index();
                                     info!("Deshred thread {thread_name} received fec: [{}] shred: {:?}", fec_set_index, shred_id);
                                     processed_shreds.insert(shred_id);
+
+                                    deshred::reconstruct_shreds_to_entries(
+                                        shred,
+                                        &mut all_shreds,
+                                        &mut deshredded_entries,
+                                        &rs_cache,
+                                        &metrics,
+                                    );
+                                    let mut deshred_entries = &mut deshredded_entries;
+
+                                    deshred_entries
+                                        .drain(..)
+                                        .for_each(|(slot, _entries, entries_bytes)| {
+                                            let _ = entry_sender.send(PbEntry {
+                                                slot,
+                                                entries: entries_bytes,
+                                            });
+                                        });
+
                                 }
                             }
 
@@ -426,6 +456,7 @@ pub fn start_deshred_threads(
                             }
                         }
                     }
+
                     log::warn!("Exiting deshred thread {thread_id}.");
                 })
                 .unwrap();
