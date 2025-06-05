@@ -86,7 +86,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
                     );
                     // 3. process the neighborhood of shreds
                     if let Some(pumpfun_tx) = extract_pumpfun_transaction(slot, &shreds_data) {
-                        info!("[{:?}] PumpfunTx: {:?}", start.elapsed(), pumpfun_tx);
+                        info!("[{:?}] PumpfunTx: {}", start.elapsed(), pumpfun_tx);
                     }
                 });
             }

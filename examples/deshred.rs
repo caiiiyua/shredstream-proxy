@@ -3,11 +3,13 @@ use jito_protos::shredstream::{
 };
 use solana_sdk::pubkey;
 use solana_sdk::pubkey::Pubkey;
+use log::info;
 
 pub const PUMPFUN_MINT_AUTHORITY: Pubkey = pubkey!("TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM");
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
+    env_logger::builder().init();
     let mut client = ShredstreamProxyClient::connect("http://127.0.0.1:9999")
         .await
         .unwrap();
@@ -22,7 +24,7 @@ async fn main() -> Result<(), std::io::Error> {
             match bincode::deserialize::<Vec<solana_entry::entry::Entry>>(&slot_entry.entries) {
                 Ok(e) => e,
                 Err(e) => {
-                    println!("Deserialization failed with err: {e}");
+                    info!("Deserialization failed with err: {e}");
                     continue;
                 }
             };
@@ -32,7 +34,7 @@ async fn main() -> Result<(), std::io::Error> {
             for transaction in entry.transactions {
                 if transaction.message.static_account_keys().contains(&PUMPFUN_MINT_AUTHORITY) {
                     let signature = transaction.signatures.first().unwrap();
-                    println!("[{}, {}, {}][{:?}]", slot_entry.slot, entries_size, transactions, signature);
+                    info!("[{}, {}, {}][{:?}]", slot_entry.slot, entries_size, transactions, signature);
                 }
             }
         }

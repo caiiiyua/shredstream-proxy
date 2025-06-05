@@ -1591,7 +1591,9 @@ name = "examples"
 version = "0.0.0"
 dependencies = [
  "bincode",
+ "env_logger 0.11.7",
  "jito-protos",
+ "log",
  "solana-entry 2.2.1",
  "solana-sdk",
  "tokio",
