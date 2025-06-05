@@ -33,6 +33,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
         let slot = shred.common_header().slot;
         let fec_set_index = shred.fec_set_index();
         let index = shred.index();
+        let shred_type = shred.shred_type();
         all_shreds
             .entry(slot)
             .or_default()
@@ -58,15 +59,14 @@ pub fn reconstruct_shreds_to_entries<'a>(
 
             // Processing the neighborhood of shreds before deshredding
             // 1. check if the shred is highest slot seen and only process if it is
-            if slot >= highest_slot_seen {
+            if slot >= highest_slot_seen && shred_type == ShredType::Data {
                 // 2. get the neighborhood of shreds
                 let neighbor_shreds = shreds
                     .iter()
                     .filter(|shred_in_fec|
                         shred_in_fec.shred_type() == ShredType::Data &&
-                            (shred_in_fec.index() == index
-                                || index > 0 && shred_in_fec.index() == index - 1
-                                || index == shred_in_fec.index() + 1)
+                            ((index > 2 && shred_in_fec.index() >= index - 2)
+                                && (index <= shred_in_fec.index() + 2))
                     )
                     .sorted_by_key(|x| x.index())
                     .map(|shred_in_fec| shred_in_fec.0.clone())
