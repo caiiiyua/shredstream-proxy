@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, fmt, hash::Hash, sync::atomic::Ordering};
 use std::sync::Arc;
-use itertools::Itertools;
+use itertools::{min, Itertools};
 use jito_protos::shredstream::TraceShred;
 use log::{debug, info, warn};
 use prost::Message;
@@ -556,7 +556,18 @@ fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTr
 
     info!("[Nehe]Pumpfun Program Index: {}, Fee Account Index: {}, Token Mint Index: {}, Bonding Curve Index: {}, Dev Account Index: {}", pumpfun_program_index, fee_account_index, token_mint_index, bonding_curve_index, dev_account_index);
 
-    if (pumpfun_program_index as usize - fee_account_index as usize) * 32 > pumpfun_program_pos  {
+    let least_index = [
+        fee_account_index,
+        token_mint_index,
+        bonding_curve_index,
+        bonding_curve_vault_index,
+        dev_account_index,
+        creator_vault_index,
+    ]
+    .into_iter()   // moves the six integers
+    .min()         // Option<u32>
+    .unwrap();
+    if (pumpfun_program_index as usize - least_index as usize) * 32 > pumpfun_program_pos  {
         return None;
     }
 
