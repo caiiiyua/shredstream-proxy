@@ -19,6 +19,7 @@ use std::thread::Builder;
 use arc_swap::ArcSwap;
 use clap::{arg, Parser};
 use crossbeam_channel::{bounded, Receiver, RecvError, Sender};
+use env_logger::{Env, DEFAULT_FILTER_ENV, DEFAULT_WRITE_STYLE_ENV};
 use itertools::Itertools;
 use log::*;
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -205,7 +206,9 @@ use jito_protos::shredstream::{Entry as PbEntry, Entry, TraceShred};
 
 pub type ReconstructedShredsMap = HashMap<Slot, HashMap<u32 /* fec_set_index */, Vec<Shred>>>;
 fn main() -> Result<(), ShredstreamProxyError> {
-    env_logger::builder().init();
+    env_logger::builder()
+        .format_timestamp_millis()
+        .init();
 
     let all_args: Args = Args::parse();
 

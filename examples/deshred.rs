@@ -9,7 +9,9 @@ pub const PUMPFUN_MINT_AUTHORITY: Pubkey = pubkey!("TSLvdd1pWpHVjahSpsvCXUbgwsL3
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
-    env_logger::builder().init();
+    env_logger::builder()
+        .format_timestamp_millis()
+        .init();
     let mut client = ShredstreamProxyClient::connect("http://127.0.0.1:9999")
         .await
         .unwrap();
