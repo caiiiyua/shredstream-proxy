@@ -72,10 +72,14 @@ pub fn reconstruct_shreds_to_entries<'a>(
                     .map(|shred_in_fec| shred_in_fec.0.clone())
                     .collect_vec();
                 runtime.spawn(async move {
-                    let shreds_data = neighbor_shreds
+                    let shreds_data: Vec<u8> = neighbor_shreds
                         .iter()
-                        .flat_map(|s|  solana_ledger::shred::layout::get_data(s.payload()).ok())
-                        .collect_vec();
+                        // keep only shreds whose payload really contains "data"
+                        .filter_map(|s| solana_ledger::shred::layout::get_data(s.payload()).ok())
+                        // flatten &[u8] → iterator of u8
+                        .flatten()
+                        .copied()
+                        .collect();
                     info!("Processing neighbour shreds for slot {slot}, fec_set_index {fec_set_index}, index {}. Neighbor shreds count: {}, data: {}",
                         neighbor_shreds.iter().map(|s| s.index()).join(", "),
                         neighbor_shreds.len(),
