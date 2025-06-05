@@ -202,7 +202,7 @@ fn shutdown_notifier(exit: Arc<AtomicBool>) -> io::Result<(Sender<()>, Receiver<
     Ok((s, r))
 }
 
-use jito_protos::shredstream::{Entry as PbEntry, Entry, TraceShred};
+use jito_protos::shredstream::{Entry as PbEntry, Entry, PumpfunTx, TraceShred};
 
 pub type ReconstructedShredsMap = HashMap<Slot, HashMap<u32 /* fec_set_index */, Vec<Shred>>>;
 fn main() -> Result<(), ShredstreamProxyError> {
@@ -315,6 +315,7 @@ fn main() -> Result<(), ShredstreamProxyError> {
         shutdown_receiver.clone(),
         exit.clone(),
         entry_sender.clone(),
+        pumpfun_sender.clone(),
         metrics.clone(),
         runtime.clone(),
     );
@@ -392,6 +393,7 @@ pub fn start_deshred_threads(
     shutdown_receiver: Receiver<()>,
     exit: Arc<AtomicBool>,
     entry_sender: Arc<tokio::sync::broadcast::Sender<PbEntry>>,
+    pumpfun_sender: Arc<tokio::sync::broadcast::Sender<PumpfunTx>>,
     metrics: Arc<ShredMetrics>,
     runtime: Arc<Runtime>,
 ) -> Vec<JoinHandle<()>> {
@@ -404,6 +406,7 @@ pub fn start_deshred_threads(
             let thread_name = format!("sstDeshred_{thread_id}");
             let metrics = metrics.clone();
             let entry_sender = entry_sender.clone();
+            let pumpfun_sender = pumpfun_sender.clone();
             let mut deshredded_entries: Vec<(Slot, Vec<solana_entry::entry::Entry>, Vec<u8>)> = Vec::new();
             let rs_cache = ReedSolomonCache::default();
             let runtime = runtime.clone();
@@ -442,6 +445,7 @@ pub fn start_deshred_threads(
                                         &rs_cache,
                                         &metrics,
                                         &runtime,
+                                        pumpfun_sender.clone(),
                                     );
                                     let mut deshred_entries = &mut deshredded_entries;
 

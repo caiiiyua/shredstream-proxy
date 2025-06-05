@@ -1,6 +1,4 @@
-use jito_protos::shredstream::{
-    shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
-};
+use jito_protos::shredstream::{shredstream_proxy_client::ShredstreamProxyClient, PumpfunTx, SubscribeEntriesRequest, SubscribePumpfunTxRequest};
 use solana_sdk::pubkey;
 use solana_sdk::pubkey::Pubkey;
 use log::info;
@@ -15,6 +13,20 @@ async fn main() -> Result<(), std::io::Error> {
     let mut client = ShredstreamProxyClient::connect("http://127.0.0.1:9999")
         .await
         .unwrap();
+
+    let mut client_a = client.clone();
+    tokio::spawn(async move {
+        let mut stream = client_a
+            .subscribe_pumpfun_tx(SubscribePumpfunTxRequest {})
+            .await
+            .unwrap()
+            .into_inner();
+
+        while let Some(pumpfun_tx) = stream.message().await.unwrap() {
+            info!("pumpfun_tx: {:?}", pumpfun_tx);
+        }
+    });
+
     let mut stream = client
         .subscribe_entries(SubscribeEntriesRequest {})
         .await

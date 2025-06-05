@@ -1,13 +1,14 @@
 use std::{collections::{HashMap, HashSet}, fmt, hash::Hash, sync::atomic::Ordering};
 use std::sync::Arc;
 use itertools::{min, Itertools};
-use jito_protos::shredstream::TraceShred;
+use jito_protos::shredstream::{Entry, PumpfunTx, TraceShred};
 use log::{debug, info, warn};
 use prost::Message;
 use solana_ledger::shred::{merkle::{Shred, ShredCode}, ReedSolomonCache, ShredType, Shredder};
 use solana_sdk::bs58;
 use solana_sdk::clock::{Slot, MAX_PROCESSING_AGE};
 use tokio::runtime::Runtime;
+use tokio::sync::broadcast::Sender;
 use tokio::time::Instant;
 use crate::forwarder::ShredMetrics;
 
@@ -23,6 +24,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
     rs_cache: &ReedSolomonCache,
     metrics: &ShredMetrics,
     runtime: &Arc<Runtime>,
+    pumpfun_sender: Arc<Sender<PumpfunTx>>,
 ) -> usize {
     let mut recovered_count = 0;
     deshredded_entries.clear();
@@ -69,6 +71,7 @@ pub fn reconstruct_shreds_to_entries<'a>(
                     .map(|shred_in_fec| shred_in_fec.0.clone())
                     .collect_vec();
 
+                let pumpfun_sender = pumpfun_sender.clone();
                 runtime.spawn(async move {
                     let start = Instant::now();
                     let shreds_data: Vec<u8> = neighbor_shreds
@@ -85,13 +88,9 @@ pub fn reconstruct_shreds_to_entries<'a>(
                         shreds_data.len()
                     );
                     // 3. process the neighborhood of shreds
-                    match extract_pumpfun_transaction_safe(slot, &shreds_data) {
-                        Ok(pumpfun_tx) => {
-                            info!("[{:?}] PumpfunTx: {}", start.elapsed(), pumpfun_tx);
-                        }
-                        Err(e) => {
-                            warn!("{e}");
-                        }
+                    if let Ok(pumpfun_tx) = extract_pumpfun_transaction_safe(slot, &shreds_data) {
+                        info!("[{:?}] PumpfunTx: {}", start.elapsed(), pumpfun_tx);
+                        pumpfun_sender.send(PumpfunTx::from(pumpfun_tx)).unwrap();
                     }
                 });
             }
@@ -643,6 +642,22 @@ fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTr
         block_hash: block_hash.try_into().ok()?,
         dev_account: dev_account.try_into().ok()?,
     })
+}
+
+impl From<PumpfunTransaction> for PumpfunTx {
+    fn from(tx: PumpfunTransaction) -> Self {
+        PumpfunTx {
+            token_amount: tx.token_amount,
+            sol_paid: tx.sol_paid,
+            slot: tx.slot,
+            fee_account: tx.fee_account.to_vec(),
+            token_mint: tx.token_mint.to_vec(),
+            bonding_curve: tx.bonding_curve.to_vec(),
+            bonding_curve_vault: tx.bonding_curve_vault.to_vec(),
+            dev_account: tx.dev_account.to_vec(),
+            creator_vault: tx.creator_vault.to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
