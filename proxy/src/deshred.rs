@@ -85,8 +85,13 @@ pub fn reconstruct_shreds_to_entries<'a>(
                         shreds_data.len()
                     );
                     // 3. process the neighborhood of shreds
-                    if let Some(pumpfun_tx) = extract_pumpfun_transaction(slot, &shreds_data) {
-                        info!("[{:?}] PumpfunTx: {}", start.elapsed(), pumpfun_tx);
+                    match extract_pumpfun_transaction_safe(slot, &shreds_data) {
+                        Ok(pumpfun_tx) => {
+                            info!("[{:?}] PumpfunTx: {}", start.elapsed(), pumpfun_tx);
+                        }
+                        Err(e) => {
+                            warn!("{e}");
+                        }
                     }
                 });
             }
@@ -512,6 +517,19 @@ const PUMPFUN_PROGRAM_ID: &[u8; 32] = &[
     0x01, 0x56, 0xe0, 0xf6, 0x93, 0x66, 0x5a, 0xcf, 0x44, 0xdb, 0x15, 0x68, 0xbf, 0x17, 0x5b, 0xaa,
     0x51, 0x89, 0xcb, 0x97, 0xf5, 0xd2, 0xff, 0x3b, 0x65, 0x5d, 0x2b, 0xb6, 0xfd, 0x6d, 0x18, 0xb0,
 ];
+
+fn extract_pumpfun_transaction_safe(
+    slot: u64,
+    shred_data: &[u8],
+) -> Result<PumpfunTransaction, String> {
+    extract_pumpfun_transaction(slot, shred_data).ok_or_else(|| {
+        format!(
+            "Failed to extract Pumpfun transaction from slot {} with data size {}",
+            slot,
+            shred_data.len()
+        )
+    })
+}
 
 fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTransaction> {
     // Step 1: Find the mint authority
