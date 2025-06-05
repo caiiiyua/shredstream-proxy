@@ -1,6 +1,12 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+use solana_sdk::pubkey;
+use solana_sdk::pubkey::Pubkey;
 use jito_protos::shredstream::{
     shredstream_proxy_client::ShredstreamProxyClient, SubscribeEntriesRequest,
 };
+
+pub const PUMPFUN_MINT_AUTHORITY: Pubkey = pubkey!("TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM");
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -28,6 +34,16 @@ async fn main() -> Result<(), std::io::Error> {
             entries.len(),
             entries.iter().map(|e| e.transactions.len()).sum::<usize>()
         );
+        tokio::spawn(async move {
+            for entry in entries {
+                for transaction in entry.transactions {
+                    if transaction.message.static_account_keys().contains(&PUMPFUN_MINT_AUTHORITY) {
+                        let signature = transaction.signatures.first().unwrap();
+                        println!("[{}][{:?}]", slot_entry.slot, signature);
+                    }
+                }
+            }
+        });
     }
     Ok(())
 }

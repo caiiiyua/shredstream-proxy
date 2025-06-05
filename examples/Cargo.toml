@@ -11,6 +11,7 @@ path = "deshred.rs"
 bincode = { workspace = true }
 jito-protos = { path = "../jito_protos" }
 solana-entry = { workspace = true }
+solana-sdk = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 
 [[example]]

@@ -1593,6 +1593,7 @@ dependencies = [
  "bincode",
  "jito-protos",
  "solana-entry 2.2.1",
+ "solana-sdk",
  "tokio",
 ]
 
