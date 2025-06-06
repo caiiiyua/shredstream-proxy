@@ -524,11 +524,10 @@ fn extract_pumpfun_transaction_safe(
     slot: u64,
     shred_data: &[u8],
 ) -> Result<PumpfunTransaction, String> {
-    match catch_unwind(AssertUnwindSafe(|| extract_pumpfun_transaction(slot, shred_data))) {
-        Ok(Some(tx)) => Ok(tx),
-        Ok(None) => Err("Failed to extract Pumpfun transaction: No valid data found".to_string()),
-        Err(e) => Err(format!("Failed to extract Pumpfun transaction: {:?}", e)),
-    }
+    catch_unwind(AssertUnwindSafe(|| {
+        extract_pumpfun_transaction(slot, shred_data)
+            .ok_or("no tx found".to_string())
+    })).map_err(|e| format!("panic in extract_pumpfun_transaction: {e:?}"))?
 }
 
 fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTransaction> {
