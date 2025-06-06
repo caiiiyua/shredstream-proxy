@@ -132,6 +132,10 @@ struct CommonArgs {
     /// Number of threads to use. Defaults to use up to 4.
     #[arg(long, env)]
     num_threads: Option<usize>,
+
+    /// Number of threads to use. Defaults to use at least to 4.
+    #[arg(long, env)]
+    deshred_threads: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -231,10 +235,9 @@ fn main() -> Result<(), ShredstreamProxyError> {
         panic!("No destinations found. You must provide values for --dest-ip-ports or --endpoint-discovery-url.")
     }
 
-    let num_threads = args.num_threads
+    let deshred_threads = args.deshred_threads
         .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).max(4));
 
-    let deshred_threads = num_threads * 2;
     // Create a vector of (Sender, Receiver) pairs, one per thread
     let mut partition_txs = Vec::with_capacity(deshred_threads);
     let mut partition_rxs = Vec::with_capacity(deshred_threads);
