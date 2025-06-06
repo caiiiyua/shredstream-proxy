@@ -589,10 +589,10 @@ fn extract_pumpfun_transaction(slot: u64, shred_data: &[u8]) -> Option<PumpfunTr
     }
 
     // Step 9: Extract account addresses based on calculated indices
-    let fee_accoun_pos = pumpfun_program_pos - (pumpfun_program_index - fee_account_index) as usize * 32;
+    let fee_accoun_pos = pumpfun_program_pos.checked_sub((pumpfun_program_index - fee_account_index) as usize * 32)?;
     let fee_account = &shred_data[fee_accoun_pos..(fee_accoun_pos + 32)];
 
-    let token_mint_pos = pumpfun_program_pos - (pumpfun_program_index - token_mint_index) as usize * 32;
+    let token_mint_pos = pumpfun_program_pos.checked_sub((pumpfun_program_index - token_mint_index) as usize * 32)?;
     let token_mint = &shred_data[token_mint_pos..(token_mint_pos + 32)];
 
     let bonding_curve_pos = token_mint_pos + 32 * (bonding_curve_index - token_mint_index) as usize;
